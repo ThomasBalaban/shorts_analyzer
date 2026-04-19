@@ -34,6 +34,105 @@ from models import (
 from config import get_youtube_api_key
 
 
+# ─── Response schema ──────────────────────────────────────────────────────────
+# Forcing structured JSON output means no more splitting "TITLE EFFECTIVENESS:"
+# out of a prose blob and no more stray "****" / "**\n" markdown artifacts
+# bleeding into the saved fields. Gemini returns exactly these keys.
+
+_ANALYSIS_SCHEMA = types.Schema(
+    type="OBJECT",
+    properties={
+        "title": types.Schema(
+            type="OBJECT",
+            properties={
+                "text": types.Schema(
+                    type="STRING",
+                    description="The exact title of the short, copied verbatim.",
+                ),
+                "why_it_worked": types.Schema(
+                    type="STRING",
+                    description=(
+                        "Detailed analysis of why this specific title was effective. "
+                        "Cover the concrete mechanics: curiosity gap, pop-culture "
+                        "reference, promise/payoff structure, emotional hook, "
+                        "specificity, POV, question vs statement, length, "
+                        "word choice. Explain how it pairs with the video's "
+                        "content. 4-6 sentences."
+                    ),
+                ),
+            },
+            required=["text", "why_it_worked"],
+        ),
+        "hook": types.Schema(
+            type="OBJECT",
+            properties={
+                "description": types.Schema(
+                    type="STRING",
+                    description=(
+                        "A precise description of the hook portion of the video "
+                        "— you decide where the hook ends based on the video's "
+                        "structure. Describe exactly what the viewer sees and "
+                        "hears: first frame composition, on-screen text, audio, "
+                        "tone, what question or tension it plants."
+                    ),
+                ),
+                "why_it_worked": types.Schema(
+                    type="STRING",
+                    description=(
+                        "Why this hook stops the scroll. Discuss pattern "
+                        "interrupts, curiosity, visual contrast, audio cues, "
+                        "and how it sets up the payoff. 3-5 sentences."
+                    ),
+                ),
+            },
+            required=["description", "why_it_worked"],
+        ),
+        "video_description": types.Schema(
+            type="STRING",
+            description=(
+                "A detailed beat-by-beat walkthrough of the entire short. "
+                "Describe every cut and edit, what's on screen, on-screen text "
+                "overlays, audio choices (meme audio vs original VO vs music vs "
+                "silence), pacing and rhythm, timing of the punchline, visual "
+                "effects, and how the edit builds to its payoff. Be specific "
+                "and concrete — cite approximate timestamps where helpful. "
+                "This should read like an editor's breakdown, not a summary."
+            ),
+        ),
+        "why_the_video_worked": types.Schema(
+            type="STRING",
+            description=(
+                "Why this video earned the views it did. Analyze the content "
+                "itself: setup/payoff structure, comedic or emotional timing, "
+                "audio-visual synchronization, relatability, rewatchability, "
+                "how the edit amplifies the core idea. Distinct from the title "
+                "analysis — this is about the content, not the packaging. "
+                "4-6 sentences."
+            ),
+        ),
+        "what_could_have_been_better": types.Schema(
+            type="STRING",
+            description=(
+                "Concrete, specific suggestions for what could have made this "
+                "short perform even better. Think like an experienced editor "
+                "giving notes: pacing changes, tighter cuts, different audio, "
+                "a stronger first frame, better on-screen text, a sharper "
+                "title variant, etc. Avoid generic advice — every suggestion "
+                "should be tied to something specific in THIS video. "
+                "3-5 sentences."
+            ),
+        ),
+    },
+    required=[
+        "title",
+        "hook",
+        "video_description",
+        "why_the_video_worked",
+        "what_could_have_been_better",
+    ],
+)
+
+
 class YouTubeShortAnalyzer:
     """Handles fetching, downloading, and analyzing YouTube shorts."""
 
@@ -223,22 +322,30 @@ class YouTubeShortAnalyzer:
             raise
 
     def analyze_with_gemini(self, video_path: Path, title: str, views: int):
-        """Analyze video with Gemini via the new SDK."""
-        prompt = f"""You are analyzing a YouTube Short to understand why its title was effective.
+        """Analyze video with Gemini, returning a structured dict.
+
+        Uses Gemini's response schema feature so the model returns strict
+        JSON — no prose parsing, no stripping of stray markdown.
+        """
+        prompt = f"""You are a senior short-form video editor and strategist analyzing a YouTube Short to understand, in concrete detail, why the TITLE and the HOOK worked (or didn't).
 
 Video Title: "{title}"
 Views: {views:,}
 
-Please provide:
-1. A detailed description of what happens in this video (2-3 sentences)
-2. An analysis of why this title was effective for this content (3-4 sentences covering specific techniques used)
+Watch the video carefully and think like an editor doing a postmortem. Pay close attention to:
+  - The exact moment the viewer's scroll is interrupted (the hook)
+  - Every cut, edit, and transition
+  - On-screen text and overlays
+  - Audio choices — meme audio, original voiceover, music, silence, sound design
+  - Pacing, rhythm, and the timing of the punchline or payoff
+  - Visual effects, framing, and composition
+  - How the title pairs with what actually happens in the video
 
-Format your response as:
-VIDEO DESCRIPTION:
-[Your description here]
+You decide where the "hook" ends based on the video's own structure — it might be the first 1.5 seconds, it might be the full setup before a reveal. Explain it precisely.
 
-TITLE EFFECTIVENESS:
-[Your analysis here]"""
+Be specific and concrete. Cite timestamps where helpful. Avoid generic observations. Every claim should be tied to something that actually happens in THIS video. The "what could have been better" field should give real editor's notes — specific changes someone could actually make — not vague encouragement.
+
+Respond strictly in the required JSON schema. Do not wrap your response in code fences or markdown."""
 
         video_file = None
         try:
@@ -287,24 +394,12 @@ TITLE EFFECTIVENESS:
                     thinking_config=types.ThinkingConfig(
                         thinking_level=THINKING_ANALYSIS,
                     ),
+                    response_mime_type="application/json",
+                    response_schema=_ANALYSIS_SCHEMA,
                 ),
             )
 
-            response_text = response.text
-            parts = response_text.split("TITLE EFFECTIVENESS:")
-
-            if len(parts) == 2:
-                description = parts[0].replace(
-                    "VIDEO DESCRIPTION:", "").strip()
-                effectiveness = parts[1].strip()
-            else:
-                description = response_text[:len(response_text) // 2].strip()
-                effectiveness = response_text[len(response_text) // 2:].strip()
-
-            return {
-                "video_description": description,
-                "title_effectiveness_analysis": effectiveness,
-            }
+            return self._parse_structured_response(response, title)
 
         except Exception as e:
             self._log(f"Error analyzing with Gemini: {e}")
@@ -315,6 +410,57 @@ TITLE EFFECTIVENESS:
                     self.gemini_client.files.delete(name=video_file.name)
                 except Exception:
                     pass
+
+    def _parse_structured_response(self, response, fallback_title: str) -> dict:
+        """Turn a Gemini structured-JSON response into a clean dict.
+
+        Prefer `response.parsed` when the SDK gives it to us; fall back to
+        parsing `response.text` (which is guaranteed JSON because we set
+        `response_mime_type='application/json'` + a schema). If Gemini ever
+        slips and wraps it in ```json fences we strip those too.
+        """
+        # Path 1: SDK-parsed object
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, dict) and parsed:
+            return self._ensure_title_text(parsed, fallback_title)
+
+        # Path 2: JSON in response.text
+        raw = (response.text or "").strip()
+        if raw.startswith("```"):
+            # Strip ```json ... ``` fences if present
+            raw = raw.strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return self._ensure_title_text(data, fallback_title)
+        except json.JSONDecodeError as e:
+            self._log(f"  ⚠️  Failed to parse structured JSON: {e}")
+            self._log(f"  Raw response (first 500 chars): {raw[:500]}")
+
+        # Path 3: give up gracefully — return a shell that preserves the
+        # raw text so the run doesn't die and you can still inspect it.
+        return {
+            "title": {"text": fallback_title, "why_it_worked": ""},
+            "hook": {"description": "", "why_it_worked": ""},
+            "video_description": "",
+            "why_the_video_worked": "",
+            "what_could_have_been_better": "",
+            "_parse_error": True,
+            "_raw_response": raw,
+        }
+
+    @staticmethod
+    def _ensure_title_text(data: dict, fallback_title: str) -> dict:
+        """Make sure title.text is populated — it's the exact title from YouTube
+        and we already know it, so overwrite anything weird Gemini put there."""
+        if not isinstance(data.get("title"), dict):
+            data["title"] = {"text": fallback_title, "why_it_worked": ""}
+        else:
+            data["title"]["text"] = fallback_title
+        return data
 
     def load_existing_results(self) -> dict:
         # Treat an empty or corrupt file the same as "no previous results".
@@ -335,6 +481,7 @@ TITLE EFFECTIVENESS:
                 "date_analyzed": datetime.now().strftime("%Y-%m-%d"),
                 "total_shorts_analyzed": 0,
                 "gemini_model": MODEL_PRO,
+                "schema_version": 2,
             },
             "shorts": [],
         }
