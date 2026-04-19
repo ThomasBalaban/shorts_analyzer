@@ -26,7 +26,8 @@ except ImportError as e:
 from google.genai import types  # type: ignore
 
 from models import (
-    MODEL_FLASH,
+    MODEL_PRO,
+    THINKING_ANALYSIS,
     get_gemini_client,
     get_safety_settings,
 )
@@ -279,10 +280,13 @@ TITLE EFFECTIVENESS:
             )
 
             response = self.gemini_client.models.generate_content(
-                model=MODEL_FLASH,
+                model=MODEL_PRO,
                 contents=[file_part, prompt],
                 config=types.GenerateContentConfig(
                     safety_settings=self.gemini_safety,
+                    thinking_config=types.ThinkingConfig(
+                        thinking_level=THINKING_ANALYSIS,
+                    ),
                 ),
             )
 
@@ -313,16 +317,24 @@ TITLE EFFECTIVENESS:
                     pass
 
     def load_existing_results(self) -> dict:
-        if os.path.exists(self.output_file):
-            with open(self.output_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+        # Treat an empty or corrupt file the same as "no previous results".
+        # Can happen if a previous run crashed before writing anything.
+        if os.path.exists(self.output_file) and os.path.getsize(self.output_file) > 0:
+            try:
+                with open(self.output_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except json.JSONDecodeError as e:
+                self._log(
+                    f"⚠️  Existing results file is not valid JSON "
+                    f"({e}). Starting fresh."
+                )
 
         return {
             "metadata": {
                 "channel_url": self.channel_url,
                 "date_analyzed": datetime.now().strftime("%Y-%m-%d"),
                 "total_shorts_analyzed": 0,
-                "gemini_model": MODEL_FLASH,
+                "gemini_model": MODEL_PRO,
             },
             "shorts": [],
         }
