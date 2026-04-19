@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+venv/
+.env
+
+config.json
+output/*.json
+temp_downloads/

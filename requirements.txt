@@ -1,0 +1,11 @@
+# Google Gen AI SDK (Gemini 3) — needs 1.51.0+
+google-genai>=1.51.0
+
+# YouTube Data API + downloader
+google-api-python-client
+yt-dlp
+
+# Headless API
+fastapi
+uvicorn
+pydantic

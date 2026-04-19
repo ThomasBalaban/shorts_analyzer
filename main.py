@@ -1,0 +1,98 @@
+"""
+Direct CLI entry point — analyze a channel and exit.
+
+Usage:
+    python main.py                                    # uses defaults below
+    python main.py --channel @PeepingOtter
+    python main.py --channel https://youtube.com/@PeepingOtter --max 50
+    python main.py --channel @PeepingOtter --output my_results.json
+"""
+
+import argparse
+import os
+import sys
+
+from analyzer import YouTubeShortAnalyzer
+
+
+# Defaults — edit these to change what `python main.py` does with no args
+DEFAULT_CHANNEL = "https://www.youtube.com/@PeepingOtter/shorts"
+DEFAULT_MAX_SHORTS = 100
+DEFAULT_OUTPUT_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "output")
+
+
+def _normalize_channel(channel: str) -> str:
+    """Accept either '@handle' or a full URL and return a full URL."""
+    channel = channel.strip()
+    if channel.startswith("http://") or channel.startswith("https://"):
+        return channel
+    if channel.startswith("@"):
+        return f"https://www.youtube.com/{channel}/shorts"
+    return f"https://www.youtube.com/@{channel}/shorts"
+
+
+def _derive_output_filename(channel_url: str) -> str:
+    """Pull the @handle out of a URL to name the output file."""
+    for part in channel_url.rstrip("/").split("/"):
+        if part.startswith("@"):
+            return f"{part.lstrip('@')}.json"
+    return "shorts_analysis.json"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Analyze a YouTube channel's top Shorts with Gemini.")
+    parser.add_argument(
+        "--channel", "-c",
+        default=DEFAULT_CHANNEL,
+        help=f"Channel URL or @handle (default: {DEFAULT_CHANNEL})",
+    )
+    parser.add_argument(
+        "--max", "-m",
+        type=int, default=DEFAULT_MAX_SHORTS, dest="max_shorts",
+        help=f"Max shorts to analyze (default: {DEFAULT_MAX_SHORTS})",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        default=None,
+        help="Output JSON filename or path. Defaults to output/<handle>.json.",
+    )
+    args = parser.parse_args()
+
+    channel_url = _normalize_channel(args.channel)
+
+    # Work out where the JSON should land
+    if args.output:
+        # Absolute or relative path from user — respect it exactly
+        output_path = args.output
+        if not output_path.endswith(".json"):
+            output_path += ".json"
+    else:
+        os.makedirs(DEFAULT_OUTPUT_DIR, exist_ok=True)
+        output_path = os.path.join(
+            DEFAULT_OUTPUT_DIR, _derive_output_filename(channel_url))
+
+    analyzer = YouTubeShortAnalyzer(
+        channel_url=channel_url,
+        output_file=output_path,
+        max_shorts=args.max_shorts,
+    )
+
+    try:
+        analyzer.process_shorts()
+        return 0
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user. Progress has been saved.")
+        return 130
+    except Exception as e:
+        print(f"\n\nFatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+    finally:
+        analyzer.cleanup()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
