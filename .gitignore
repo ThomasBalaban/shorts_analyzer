@@ -7,3 +7,6 @@ venv/
 config.json
 output/*.json
 temp_downloads/
+data/synthesis/.keep
+data/analytics_cache/.keep
+data/channel_context/.keep

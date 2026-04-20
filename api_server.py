@@ -9,8 +9,7 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
