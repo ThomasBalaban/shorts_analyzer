@@ -50,9 +50,22 @@ class GeminiVideoAnalyzer:
     def _log(self, msg: str) -> None:
         self.log_func(msg)
 
-    def analyze(self, video_path: Path, title: str, views: int) -> dict:
-        """Analyze a single video, return structured dict matching ANALYSIS_SCHEMA."""
-        prompt = build_analysis_prompt(title, views)
+    def analyze(
+        self,
+        video_path: Path,
+        title: str,
+        views: int,
+        analytics: Optional[dict] = None,
+    ) -> dict:
+        """Analyze a single video, return structured dict matching ANALYSIS_SCHEMA.
+
+        analytics: optional enrichment dict from ChannelBaseline —
+            {avg_view_percentage, estimated_minutes_watched, retention_curve,
+             breakout_score}. When provided, the prompt embeds the retention
+            curve so Gemini must reconcile its prose with actual viewer
+            behavior.
+        """
+        prompt = build_analysis_prompt(title, views, analytics)
 
         video_file = None
         try:

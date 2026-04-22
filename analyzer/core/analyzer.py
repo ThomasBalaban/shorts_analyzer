@@ -28,6 +28,12 @@ from analyzer.youtube.data_api import YouTubeDataClient, duration_to_seconds
 from analyzer.youtube.downloader import ShortDownloader
 
 
+# Bump when the Gemini schema changes shape in a way that makes old
+# records incompatible with new consumers. On mismatch, existing output
+# files are ignored and everything re-analyzes.
+SCHEMA_VERSION = 3
+
+
 class YouTubeShortAnalyzer:
     """Orchestrator: fetch top shorts, download each, analyze with Gemini, save."""
 
@@ -80,12 +86,22 @@ class YouTubeShortAnalyzer:
     # ─── Persistence ─────────────────────────────────────────────────────────
 
     def load_existing_results(self) -> dict:
-        """Resume from an existing JSON file, or start fresh if empty/corrupt."""
+        """Resume from an existing JSON file, or start fresh if empty/corrupt
+        or if the schema version is older than the current one (old records
+        are missing required fields, so rebuilding is the right move)."""
         if (os.path.exists(self.output_file)
                 and os.path.getsize(self.output_file) > 0):
             try:
                 with open(self.output_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    loaded = json.load(f)
+                file_version = loaded.get("metadata", {}).get("schema_version")
+                if file_version == SCHEMA_VERSION:
+                    return loaded
+                self._log(
+                    f"⚠️  Existing results use schema v{file_version}; "
+                    f"current is v{SCHEMA_VERSION}. Starting fresh — "
+                    f"old records will be re-analyzed."
+                )
             except json.JSONDecodeError as e:
                 self._log(
                     f"⚠️  Existing results file is not valid JSON "
@@ -98,7 +114,7 @@ class YouTubeShortAnalyzer:
                 "date_analyzed": datetime.now().strftime("%Y-%m-%d"),
                 "total_shorts_analyzed": 0,
                 "gemini_model": MODEL_PRO,
-                "schema_version": 2,
+                "schema_version": SCHEMA_VERSION,
             },
             "shorts": [],
         }
@@ -172,11 +188,15 @@ class YouTubeShortAnalyzer:
                 video_path = self.downloader.download(
                     short["url"], video_id)
 
+                enrichment = self.baseline.get_video_enrichment(video_id)
+
                 self._log("  Analyzing with Gemini...")
                 analysis = self.gemini.analyze(
-                    video_path, short["title"], short["views"])
-
-                enrichment = self.baseline.get_video_enrichment(video_id)
+                    video_path,
+                    short["title"],
+                    short["views"],
+                    analytics=enrichment,
+                )
                 result_entry = {
                     "rank": rank,
                     "video_id": video_id,

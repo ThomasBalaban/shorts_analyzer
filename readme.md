@@ -137,3 +137,6 @@ curl "http://localhost:9021/results/read?name=PeepingOtter.json"
 - The `temp_downloads/` directory is cleared after each job.
 - Port is hardcoded to **9021** in `api_server.py`. SimpleAutoSubs uses
   9020, so they don't collide.
+
+
+```python main.py --max 1 --output output/_test_phase23.json```
