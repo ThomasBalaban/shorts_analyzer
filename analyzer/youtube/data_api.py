@@ -5,12 +5,14 @@ Responsible for:
   - Resolving a channel handle (@...) to a channel ID
   - Listing every video on the channel
   - Fetching statistics/contentDetails for those videos
-  - Filtering down to Shorts (≤60s) and returning them sorted by views
+  - Filtering down to Shorts (≤60s, already published) and returning
+    them sorted by views
 
 This module is pure fetching. It does not download videos and it does not
 call Gemini — those live in `downloader.py` and `analyzer.gemini` respectively.
 """
 
+from datetime import datetime
 from typing import Callable, List, Optional
 
 from googleapiclient.discovery import build  # type: ignore
@@ -140,11 +142,17 @@ class YouTubeDataClient:
     ) -> List[dict]:
         """High-level helper: channel URL → list of top shorts sorted by views.
 
+        Only returns videos that are already live (published_date <= today).
+        Scheduled or upcoming videos are excluded entirely.
+
         Returns a list of dicts:
             {video_id, title, views, published_date, duration, url}
         """
         handle = extract_channel_handle(channel_url)
         self._log(f"Fetching shorts from channel: {handle}")
+
+        # Used to filter out scheduled/upcoming videos
+        today = datetime.now().strftime("%Y-%m-%d")
 
         try:
             channel_id = self.resolve_channel_id(handle)
@@ -156,6 +164,7 @@ class YouTubeDataClient:
 
             self._log("Filtering for shorts and getting view counts...")
             shorts: List[dict] = []
+            skipped_future = 0
 
             for i in range(0, len(all_videos), 50):
                 self._check_stop()
@@ -167,6 +176,17 @@ class YouTubeDataClient:
                 ).execute()
 
                 for video in videos_response.get("items", []):
+                    published_date = (
+                        video["snippet"]["publishedAt"].split("T")[0]
+                    )
+
+                    # Skip videos that haven't gone live yet — they have no
+                    # real view counts and Analytics will reject date queries
+                    # for them with a 412.
+                    if published_date > today:
+                        skipped_future += 1
+                        continue
+
                     duration = video["contentDetails"]["duration"]
                     if _is_short_duration(duration):
                         shorts.append({
@@ -174,9 +194,7 @@ class YouTubeDataClient:
                             "title": video["snippet"]["title"],
                             "views": int(
                                 video["statistics"].get("viewCount", 0)),
-                            "published_date": (
-                                video["snippet"]["publishedAt"].split("T")[0]
-                            ),
+                            "published_date": published_date,
                             "duration": duration,
                             "url": (
                                 f"https://www.youtube.com/shorts/"
@@ -188,6 +206,12 @@ class YouTubeDataClient:
                     f"  Processed {min(i+50, len(all_videos))}/"
                     f"{len(all_videos)} videos, "
                     f"found {len(shorts)} shorts so far"
+                )
+
+            if skipped_future:
+                self._log(
+                    f"Skipped {skipped_future} scheduled/upcoming video(s) "
+                    f"(publish date is in the future)"
                 )
 
             self._log(f"\nTotal shorts found: {len(shorts)}")

@@ -12,3 +12,5 @@ data/analytics_cache/.keep
 data/channel_context/.keep
 client_secret.json
 token.json
+data/analytics_cache/**.json
+data/channel_context/channel_context.json

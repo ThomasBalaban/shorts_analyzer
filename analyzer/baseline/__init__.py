@@ -91,7 +91,7 @@ class ChannelBaseline:
             [{video_id, views, published_date, ...}, ...]
 
         If analytics_client is provided, enriches each video with retention
-        curves, traffic sources, impressions, and CTR (with caching).
+        curves and basic engagement stats (with caching).
 
         Returns the full context dict and saves it to disk.
         """
@@ -138,8 +138,8 @@ class ChannelBaseline:
                             vid, s["published_date"])
                         # Only cache if at least one metric came back
                         if any(analytics.get(k) is not None for k in (
-                                "views", "impressions", "retention_curve",
-                                "traffic_sources")):
+                                "views", "retention_curve",
+                                "avg_view_percentage")):
                             self._save_cached(vid, analytics)
                     except Exception as e:
                         self._log(
@@ -148,9 +148,8 @@ class ChannelBaseline:
 
                 entry["avg_view_percentage"] = analytics.get(
                     "avg_view_percentage")
-                entry["impressions"] = analytics.get("impressions")
-                entry["ctr"] = analytics.get("ctr")
-                entry["traffic_sources"] = analytics.get("traffic_sources")
+                entry["estimated_minutes_watched"] = analytics.get(
+                    "estimated_minutes_watched")
                 entry["retention_curve"] = analytics.get("retention_curve")
                 entry["analytics_fetched_at"] = analytics.get("fetched_at")
 
@@ -186,7 +185,9 @@ class ChannelBaseline:
         if not entry:
             return None
         keys = [
-            "breakout_score", "avg_view_percentage", "impressions",
-            "ctr", "traffic_sources", "retention_curve",
+            "breakout_score",
+            "avg_view_percentage",
+            "estimated_minutes_watched",
+            "retention_curve",
         ]
         return {k: entry.get(k) for k in keys}

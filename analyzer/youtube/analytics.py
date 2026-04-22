@@ -1,9 +1,13 @@
 """
 YouTube Analytics API client (OAuth-based).
 
-Pulls private channel performance data: retention curves, traffic sources,
-impressions, and CTR. Unlike the Data API (API key), this requires OAuth
-because the data is only accessible to the channel owner.
+Pulls private channel performance data: retention curves and basic
+engagement stats (views, watch time, avg view percentage).
+
+NOTE: impressions, CTR, and traffic source breakdown require either
+the yt-analytics-monetary.readonly scope (monetized channels only) or
+Content Owner API access (MCN-level). Both have been removed — they
+will 400 on a standard channel regardless of credentials.
 
 OAuth setup (one-time):
   1. Go to Google Cloud Console → APIs & Services → Credentials
@@ -31,22 +35,6 @@ from googleapiclient.errors import HttpError
 
 
 _SCOPES = ["https://www.googleapis.com/auth/yt-analytics.readonly"]
-
-# Normalize the Analytics API's traffic source enum into readable keys
-_TRAFFIC_LABELS = {
-    "SHORTS": "shorts_feed",
-    "YT_CHANNEL": "channel_page",
-    "BROWSE_FEATURES": "browse_home",
-    "EXT_URL": "external",
-    "YT_SEARCH": "search",
-    "RELATED_VIDEO": "suggested",
-    "NOTIFICATION": "notification",
-    "PLAYLIST": "playlist",
-    "HASHTAG_PAGES": "hashtag",
-    "NO_LINK_OTHER": "other",
-    "NO_LINK_EMBEDDED": "embedded",
-    "SUBSCRIBER": "subscriber",
-}
 
 
 class YouTubeAnalyticsClient:
@@ -104,7 +92,7 @@ class YouTubeAnalyticsClient:
         self, video_id: str, published_date: str
     ) -> dict:
         """
-        Fetch all analytics data for a single video.
+        Fetch analytics data for a single video.
 
         published_date: YYYY-MM-DD string (used as the query startDate so we
         capture the full lifetime of the video from day one).
@@ -113,11 +101,13 @@ class YouTubeAnalyticsClient:
         {
             video_id, fetched_at,
             views, avg_view_percentage, estimated_minutes_watched,
-            impressions, ctr,
             retention_curve: [{pct: int, watch_ratio: float}, ...],
-            traffic_sources: {shorts_feed: float, browse_home: float, ...},
         }
         All values are None if the API returned no data for that metric.
+
+        NOTE: impressions, CTR, and traffic_sources are intentionally omitted.
+        These require monetization-level or Content Owner API access and will
+        400 on a standard channel.
         """
         end_date = datetime.now().strftime("%Y-%m-%d")
         base = dict(
@@ -132,7 +122,7 @@ class YouTubeAnalyticsClient:
             "fetched_at": datetime.now().isoformat(),
         }
 
-        # Basic engagement stats
+        # ── Basic engagement stats ─────────────────────────────────────────
         try:
             resp = self._query(
                 **base,
@@ -150,41 +140,7 @@ class YouTubeAnalyticsClient:
             result["estimated_minutes_watched"] = None
             result["avg_view_percentage"] = None
 
-        # Impressions + CTR
-        try:
-            resp = self._query(
-                **base,
-                metrics="impressions,impressionClickThroughRate",
-            )
-            row = (resp.get("rows") or [[None, None]])[0]
-            result["impressions"] = (
-                int(row[0]) if row[0] is not None else None)
-            result["ctr"] = (
-                round(float(row[1]), 4) if row[1] is not None else None)
-        except HttpError as e:
-            self._log(f"  Impressions unavailable for {video_id}: {e}")
-            result["impressions"] = None
-            result["ctr"] = None
-
-        # Traffic source breakdown (stored as fractions of total views)
-        try:
-            resp = self._query(
-                **base,
-                metrics="views",
-                dimensions="trafficSourceType",
-            )
-            rows = resp.get("rows") or []
-            total = sum(int(r[1]) for r in rows) or 1
-            result["traffic_sources"] = {
-                _TRAFFIC_LABELS.get(r[0], r[0].lower()): round(
-                    int(r[1]) / total, 3)
-                for r in rows
-            }
-        except HttpError as e:
-            self._log(f"  Traffic sources unavailable for {video_id}: {e}")
-            result["traffic_sources"] = None
-
-        # Retention curve — one data point per ~5% of video length
+        # ── Retention curve — one data point per ~5% of video length ──────
         try:
             resp = self._query(
                 **base,
