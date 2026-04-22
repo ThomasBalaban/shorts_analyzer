@@ -16,6 +16,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+from analyzer.baseline import ChannelBaseline
+from analyzer.core.config import (
+    analytics_available,
+    get_analytics_client_secrets,
+    get_analytics_token_path,
+)
 from analyzer.core.models import MODEL_PRO
 from analyzer.gemini.client import GeminiVideoAnalyzer
 from analyzer.youtube.data_api import YouTubeDataClient, duration_to_seconds
@@ -40,19 +46,29 @@ class YouTubeShortAnalyzer:
         self.log_func = log_func or print
         self.stop_flag = stop_flag or (lambda: False)
 
-        # Default temp dir lives at the project root, not next to this file
-        if temp_dir:
-            temp_path = Path(temp_dir)
-        else:
-            project_root = Path(__file__).resolve().parents[2]
-            temp_path = project_root / "temp_downloads"
+        project_root = Path(__file__).resolve().parents[2]
+        temp_path = Path(temp_dir) if temp_dir else project_root / "temp_downloads"
 
-        # Compose the pieces
         self.data_client = YouTubeDataClient(
             log_func=self._log, stop_flag=stop_flag)
         self.downloader = ShortDownloader(
             temp_dir=temp_path, log_func=self._log)
         self.gemini = GeminiVideoAnalyzer(log_func=self._log)
+
+        self.baseline = ChannelBaseline(
+            context_dir=project_root / "data" / "channel_context",
+            cache_dir=project_root / "data" / "analytics_cache",
+            log_func=self._log,
+        )
+
+        self.analytics = None
+        if analytics_available():
+            from analyzer.youtube.analytics import YouTubeAnalyticsClient
+            self.analytics = YouTubeAnalyticsClient(
+                client_secrets_path=get_analytics_client_secrets(),
+                token_path=get_analytics_token_path(),
+                log_func=self._log,
+            )
 
     def _log(self, msg: str) -> None:
         self.log_func(msg)
@@ -111,6 +127,31 @@ class YouTubeShortAnalyzer:
         top_shorts = self.data_client.fetch_shorts(
             self.channel_url, max_shorts=self.max_shorts)
 
+        # ── Phase 1: build channel context + analytics enrichment ────────────
+        channel_context = self.baseline.load()
+        if self.analytics is not None:
+            self._log("\nBuilding channel context with Analytics data...")
+            channel_context = self.baseline.build(
+                top_shorts, analytics_client=self.analytics)
+        elif channel_context is None:
+            # No OAuth — still build medians from Data API view counts alone
+            self._log(
+                "\nAnalytics not configured (no client_secrets.json). "
+                "Building baseline from Data API view counts only."
+            )
+            channel_context = self.baseline.build(top_shorts)
+
+        # Re-sort: primary = breakout_score desc, secondary = views desc
+        def _sort_key(s: dict):
+            score = self.baseline.get_breakout_score(s["video_id"])
+            return (score or 0.0, s["views"])
+
+        top_shorts.sort(key=_sort_key, reverse=True)
+        self._log(
+            f"Sorted {len(top_shorts)} shorts by breakout score "
+            "(views ÷ channel median at publish month)"
+        )
+
         for rank, short in enumerate(top_shorts, start=1):
             self._check_stop()
             video_id = short["video_id"]
@@ -135,6 +176,7 @@ class YouTubeShortAnalyzer:
                 analysis = self.gemini.analyze(
                     video_path, short["title"], short["views"])
 
+                enrichment = self.baseline.get_video_enrichment(video_id)
                 result_entry = {
                     "rank": rank,
                     "video_id": video_id,
@@ -144,6 +186,11 @@ class YouTubeShortAnalyzer:
                     "published_date": short["published_date"],
                     "duration_seconds": duration_to_seconds(
                         short["duration"]),
+                    "breakout_score": (
+                        enrichment.get("breakout_score") if enrichment
+                        else self.baseline.get_breakout_score(video_id)
+                    ),
+                    "analytics": enrichment,
                     "gemini_analysis": analysis,
                     "analysis_timestamp": datetime.now().isoformat(),
                 }

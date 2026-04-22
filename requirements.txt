@@ -10,7 +10,7 @@ fastapi
 uvicorn
 pydantic
 
-# [Phase 1] YouTube Analytics API (OAuth). Uncomment when analytics.py lands.
-# google-auth
-# google-auth-oauthlib
-# google-auth-httplib2
+# YouTube Analytics API (OAuth)
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
