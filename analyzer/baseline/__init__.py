@@ -1,9 +1,10 @@
 """
 Channel baseline + context.
 
-Builds channel_context.json: per-month view medians so any video can be
-scored against the channel's performance at the time it was published, not
-against today's much larger baseline.
+Builds the per-channel context file (e.g. `output/<handle>.context.json`):
+per-month view medians so any video can be scored against the channel's
+performance at the time it was published, not against today's much larger
+baseline.
 
 Breakout score = views / channel_median_for_publish_month
 
@@ -35,11 +36,11 @@ CACHE_TTL_DAYS = 7  # re-fetch Analytics data older than this
 class ChannelBaseline:
     def __init__(
         self,
-        context_dir: Path,
+        context_file: Path,
         cache_dir: Path,
         log_func: Optional[Callable[[str], None]] = None,
     ):
-        self.context_file = Path(context_dir) / "channel_context.json"
+        self.context_file = Path(context_file)
         self.cache_dir = Path(cache_dir)
         self.log_func = log_func or print
         self._context: Optional[dict] = None

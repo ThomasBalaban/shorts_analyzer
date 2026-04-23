@@ -13,9 +13,11 @@ Responsibilities when built:
   - Gemini-written narrative layer that reads the stats and explains the
     patterns in prose for downstream-app consumption.
 
-Writes `data/synthesis/channel_synthesis.json` — the file that downstream
+Writes `output/<handle>.synthesis.json` — the file that downstream
 title/edit-advice apps load FIRST for strategy before drilling into
-individual records for examples.
+individual records for examples. Sits next to the main analysis file
+and the channel context so every downstream-consumable product is in
+one directory.
 
 See game_plan.md → Layer 4.
 """

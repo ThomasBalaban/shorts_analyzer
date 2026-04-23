@@ -61,8 +61,16 @@ class YouTubeShortAnalyzer:
             temp_dir=temp_path, log_func=self._log)
         self.gemini = GeminiVideoAnalyzer(log_func=self._log)
 
+        # Context file sits next to the analysis file in output/ so every
+        # downstream-consumable product lives in one directory.
+        # analytics_cache/ stays under data/ — it's 99+ internal cache
+        # files, not something meant to be browsed.
+        output_path = Path(self.output_file)
+        context_file = output_path.with_name(
+            output_path.stem + ".context.json")
+
         self.baseline = ChannelBaseline(
-            context_dir=project_root / "data" / "channel_context",
+            context_file=context_file,
             cache_dir=project_root / "data" / "analytics_cache",
             log_func=self._log,
         )
@@ -127,6 +135,35 @@ class YouTubeShortAnalyzer:
         with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
 
+    def _refresh_existing_enrichment(self, results: dict) -> None:
+        """Re-stamp breakout_score and analytics on already-analyzed records.
+
+        Gemini analysis is expensive and should never re-run on resume, but
+        the cheap enrichment fields go stale whenever the baseline is
+        rebuilt (e.g. new shorts published, or a corrected baseline scope).
+        Without this, a resumed record keeps whatever breakout_score was
+        computed at its original analysis time — which is often wrong.
+        """
+        refreshed = 0
+        for entry in results["shorts"]:
+            vid = entry.get("video_id")
+            if not vid:
+                continue
+            enrichment = self.baseline.get_video_enrichment(vid)
+            if enrichment is None:
+                continue
+            new_bs = enrichment.get("breakout_score")
+            if new_bs != entry.get("breakout_score"):
+                refreshed += 1
+            entry["breakout_score"] = new_bs
+            entry["analytics"] = enrichment
+        if refreshed:
+            self._log(
+                f"Refreshed breakout_score on {refreshed} existing record(s) "
+                "against rebuilt baseline"
+            )
+            self.save_results(results)
+
     # ─── Main loop ───────────────────────────────────────────────────────────
 
     def process_shorts(self) -> dict:
@@ -140,31 +177,44 @@ class YouTubeShortAnalyzer:
         }
 
         self._log(f"Already analyzed: {len(analyzed_video_ids)} shorts")
-        top_shorts = self.data_client.fetch_shorts(
-            self.channel_url, max_shorts=self.max_shorts)
+
+        # Baseline needs the full channel population for medians to be
+        # meaningful — if we passed only the top-N slice, the "median"
+        # would be the median of the top-N, and a 100x-breakout short
+        # would score 1.0 against itself. Fetch all, build baseline from
+        # all, then slice to top-N for analysis.
+        all_shorts = self.data_client.fetch_shorts(
+            self.channel_url, max_shorts=None)
 
         # ── Phase 1: build channel context + analytics enrichment ────────────
         channel_context = self.baseline.load()
         if self.analytics is not None:
             self._log("\nBuilding channel context with Analytics data...")
             channel_context = self.baseline.build(
-                top_shorts, analytics_client=self.analytics)
+                all_shorts, analytics_client=self.analytics)
         elif channel_context is None:
             # No OAuth — still build medians from Data API view counts alone
             self._log(
                 "\nAnalytics not configured (no client_secrets.json). "
                 "Building baseline from Data API view counts only."
             )
-            channel_context = self.baseline.build(top_shorts)
+            channel_context = self.baseline.build(all_shorts)
 
-        # Re-sort: primary = breakout_score desc, secondary = views desc
+        # Resumed records were saved against a possibly-stale baseline —
+        # their breakout_score and analytics blob need refreshing before
+        # we skip them in the main loop.
+        self._refresh_existing_enrichment(results)
+
+        # Re-sort full channel: primary = breakout_score desc, secondary = views desc
         def _sort_key(s: dict):
             score = self.baseline.get_breakout_score(s["video_id"])
             return (score or 0.0, s["views"])
 
-        top_shorts.sort(key=_sort_key, reverse=True)
+        all_shorts.sort(key=_sort_key, reverse=True)
+        top_shorts = all_shorts[:self.max_shorts]
         self._log(
-            f"Sorted {len(top_shorts)} shorts by breakout score "
+            f"Sorted {len(all_shorts)} shorts by breakout score, "
+            f"taking top {len(top_shorts)} for analysis "
             "(views ÷ channel median at publish month)"
         )
 

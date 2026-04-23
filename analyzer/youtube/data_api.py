@@ -138,12 +138,16 @@ class YouTubeDataClient:
     def fetch_shorts(
         self,
         channel_url: str,
-        max_shorts: int = 100,
+        max_shorts: Optional[int] = 100,
     ) -> List[dict]:
         """High-level helper: channel URL → list of top shorts sorted by views.
 
         Only returns videos that are already live (published_date <= today).
         Scheduled or upcoming videos are excluded entirely.
+
+        max_shorts=None returns every short on the channel (used by the
+        orchestrator when building the baseline, which needs the full
+        population rather than the top-N slice).
 
         Returns a list of dicts:
             {video_id, title, views, published_date, duration, url}
@@ -217,9 +221,13 @@ class YouTubeDataClient:
             self._log(f"\nTotal shorts found: {len(shorts)}")
 
             shorts.sort(key=lambda x: x["views"], reverse=True)
-            top_shorts = shorts[:max_shorts]
+            top_shorts = shorts if max_shorts is None else shorts[:max_shorts]
 
-            self._log(f"Selected top {len(top_shorts)} shorts by view count")
+            if max_shorts is None:
+                self._log(f"Returning all {len(top_shorts)} shorts")
+            else:
+                self._log(
+                    f"Selected top {len(top_shorts)} shorts by view count")
             if top_shorts:
                 self._log(f"  Highest views: {top_shorts[0]['views']:,}")
                 self._log(f"  Lowest views: {top_shorts[-1]['views']:,}")
