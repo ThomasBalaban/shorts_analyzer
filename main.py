@@ -13,6 +13,7 @@ import os
 import sys
 
 from analyzer import YouTubeShortAnalyzer
+from analyzer.synthesis import run_synthesis
 
 
 # Defaults — edit these to change what `python main.py` does with no args
@@ -58,6 +59,22 @@ def main() -> int:
         default=None,
         help="Output JSON filename or path. Defaults to output/<handle>.json.",
     )
+    parser.add_argument(
+        "--skip-synthesis",
+        action="store_true",
+        help=(
+            "Skip the Phase 4 channel-level synthesis step after per-video "
+            "analysis. Useful when iterating on per-video analysis alone."
+        ),
+    )
+    parser.add_argument(
+        "--skip-synthesis-narrative",
+        action="store_true",
+        help=(
+            "Run Phase 4 synthesis but skip the Gemini narrative call — "
+            "emit stats only. Cheaper and faster for iteration."
+        ),
+    )
     args = parser.parse_args()
 
     channel_url = _normalize_channel(args.channel)
@@ -81,6 +98,23 @@ def main() -> int:
 
     try:
         analyzer.process_shorts()
+        if not args.skip_synthesis:
+            # Phase 4: channel-level synthesis. Runs after per-video
+            # analysis so the synthesis reads the just-written output file.
+            # A synthesis failure should not mask a successful analysis
+            # run — log it and return 0 anyway.
+            try:
+                run_synthesis(
+                    analysis_file=output_path,
+                    skip_narrative=args.skip_synthesis_narrative,
+                )
+            except Exception as e:
+                print(f"\n⚠️  Synthesis step failed: {e}")
+                print("Per-video analysis succeeded; synthesis can be "
+                      "re-run later with: python synthesize.py --analysis "
+                      f"{output_path}")
+                import traceback
+                traceback.print_exc()
         return 0
     except KeyboardInterrupt:
         print("\n\nInterrupted by user. Progress has been saved.")
