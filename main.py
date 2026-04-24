@@ -14,6 +14,7 @@ import sys
 
 from analyzer import YouTubeShortAnalyzer
 from analyzer.synthesis import run_synthesis
+from analyzer.tailwind import run_tailwind_analysis
 
 
 # Defaults — edit these to change what `python main.py` does with no args
@@ -75,6 +76,30 @@ def main() -> int:
             "emit stats only. Cheaper and faster for iteration."
         ),
     )
+    parser.add_argument(
+        "--skip-tailwind",
+        action="store_true",
+        help=(
+            "Skip the Phase 5 tailwind analysis step. Useful when "
+            "iterating on earlier phases."
+        ),
+    )
+    parser.add_argument(
+        "--tailwind-all",
+        action="store_true",
+        help=(
+            "Run Phase 5 tailwind on every short instead of only those "
+            "above the residual cutoffs. Costs more Gemini calls."
+        ),
+    )
+    parser.add_argument(
+        "--tailwind-use-trends",
+        action="store_true",
+        help=(
+            "Validate Phase 5 tailwind hypotheses against Google Trends. "
+            "Requires `pip install pytrends`."
+        ),
+    )
     args = parser.parse_args()
 
     channel_url = _normalize_channel(args.channel)
@@ -112,6 +137,22 @@ def main() -> int:
                 print(f"\n⚠️  Synthesis step failed: {e}")
                 print("Per-video analysis succeeded; synthesis can be "
                       "re-run later with: python synthesize.py --analysis "
+                      f"{output_path}")
+                import traceback
+                traceback.print_exc()
+        if not args.skip_tailwind:
+            # Phase 5: cultural tailwind. Reads the just-written output
+            # file; same fail-soft policy as Phase 4.
+            try:
+                run_tailwind_analysis(
+                    analysis_file=output_path,
+                    include_all=args.tailwind_all,
+                    use_trends=args.tailwind_use_trends,
+                )
+            except Exception as e:
+                print(f"\n⚠️  Tailwind step failed: {e}")
+                print("Per-video analysis succeeded; tailwind can be "
+                      "re-run later with: python tailwind.py --analysis "
                       f"{output_path}")
                 import traceback
                 traceback.print_exc()
