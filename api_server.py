@@ -9,7 +9,7 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -22,6 +22,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from analyzer import YouTubeShortAnalyzer  # noqa: E402
+from analyzer import rerun as rerun_mod  # noqa: E402
 
 PORT = 9021
 OUTPUT_DIR = os.path.join(_HERE, "output")
@@ -35,6 +36,7 @@ _state: Dict[str, Any] = {
     "stop_requested": False,
     "current_job": None,     # dict describing the active job
     "last_error": None,      # str, cleared on new job
+    "last_result": None,     # dict, populated by rerun jobs on success
     "progress": {
         "phase": "idle",     # "idle" | "fetching" | "analyzing" | "done" | "error"
         "current": 0,
@@ -43,6 +45,77 @@ _state: Dict[str, Any] = {
     },
 }
 _lock = threading.Lock()
+
+
+# Reruns use the same single-slot worker pattern as /analyze/start so only
+# one long-running job exists at a time. Callers poll /analyze/status to
+# watch progress, then read /videos or the written file for results.
+def _output_path(name: str) -> str:
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Invalid filename")
+    if not name.endswith(".json"):
+        name = name + ".json"
+    full = os.path.join(OUTPUT_DIR, name)
+    if not os.path.isfile(full):
+        raise HTTPException(404, f"File not found: {name}")
+    return full
+
+
+def _start_worker(kind: str, desc: dict, run) -> None:
+    """Acquire the single worker slot and launch `run()`.
+
+    `kind` labels the job ("analyze" | "rerun_analysis" | ...).
+    `desc` is a small dict summarizing what was requested, merged into
+    `current_job` for status polling. `run` is a zero-arg callable —
+    endpoints build it via closure so parameters are captured cleanly.
+    Raises HTTPException(409) if another job is already running.
+    """
+    if _state["running"]:
+        raise HTTPException(409, "A job is already running")
+    with _lock:
+        _state["running"] = True
+        _state["stop_requested"] = False
+        _state["last_error"] = None
+        _state["last_result"] = None
+        _state["current_job"] = {
+            "kind": kind,
+            "started_at": time.time(),
+            **desc,
+        }
+        _state["progress"] = {
+            "phase": kind,
+            "current": 0,
+            "total": 0,
+            "current_title": "",
+        }
+
+    def _body():
+        _log(f"=== {kind} started ===")
+        try:
+            result = run()
+            with _lock:
+                _state["last_result"] = result
+                _state["progress"]["phase"] = "done"
+            _log(f"✅ {kind} finished cleanly")
+        except InterruptedError:
+            _log(f"⏹  {kind} stopped by user")
+            with _lock:
+                _state["progress"]["phase"] = "idle"
+        except Exception as e:
+            import traceback
+            err = str(e)
+            _log(f"❌ {kind} failed: {err}")
+            _log(traceback.format_exc())
+            with _lock:
+                _state["last_error"] = err
+                _state["progress"]["phase"] = "error"
+        finally:
+            with _lock:
+                _state["running"] = False
+                _state["stop_requested"] = False
+            _log(f"=== {kind} worker exited ===")
+
+    threading.Thread(target=_body, daemon=True).start()
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -161,6 +234,50 @@ class StartRequest(BaseModel):
     max_shorts: int = 100
 
 
+class RerunRequest(BaseModel):
+    """Body for POST /rerun/*. Exactly one of `video_ids` or `filter` must
+    be set. `output` is the analyzer JSON filename in output/."""
+    output: str
+    video_ids: Optional[List[str]] = None
+    filter: Optional[str] = None
+
+
+class RerunTailwindRequest(RerunRequest):
+    include_all: bool = False
+    use_trends: bool = False
+
+
+class RerunSynthesisRequest(BaseModel):
+    output: str
+    skip_narrative: bool = False
+
+
+def _validate_rerun_body(req: RerunRequest, phase: str) -> None:
+    """Refuse ambiguous or missing selectors at the API boundary.
+
+    For the expensive Phase 2 rerun we additionally refuse
+    `filter=all` — the operator has to either name video_ids or pick a
+    narrower predicate. Prevents "rerun everything" being one typo away.
+    """
+    if req.video_ids is None and req.filter is None:
+        raise HTTPException(
+            400, "Provide either `video_ids` or `filter`.")
+    if req.video_ids is not None and req.filter is not None:
+        raise HTTPException(
+            400, "Specify `video_ids` OR `filter`, not both.")
+    if req.filter is not None and req.filter not in rerun_mod.FILTERS:
+        raise HTTPException(
+            400,
+            f"Unknown filter '{req.filter}'. "
+            f"Allowed: {sorted(rerun_mod.FILTERS)}")
+    if phase == "analysis" and req.filter == "all":
+        raise HTTPException(
+            400,
+            "filter='all' is refused for /rerun/analysis to prevent "
+            "accidental full-corpus reruns. Pass explicit video_ids "
+            "or pick a narrower predicate (e.g. model_mismatch).")
+
+
 # ─── App lifecycle ────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -224,6 +341,112 @@ def analyze_start(req: StartRequest):
     }
 
 
+# ─── Rerun ────────────────────────────────────────────────────────────────────
+
+@app.get("/videos")
+def list_videos(output: str):
+    """List every video in the corpus with its per-phase `_meta` state.
+
+    Response includes `stale_reasons` per phase — the predicate labels
+    that would select that video for rerun. No action is taken by this
+    endpoint; the operator reads it and decides.
+    """
+    full = _output_path(output)
+    try:
+        return rerun_mod.list_videos(full)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/rerun/analytics")
+def rerun_analytics(req: RerunRequest):
+    _validate_rerun_body(req, phase="analytics")
+    full = _output_path(req.output)
+    desc = {"output": req.output, "video_ids": req.video_ids,
+            "filter": req.filter}
+    _start_worker(
+        "rerun_analytics", desc,
+        lambda: rerun_mod.rerun_analytics(
+            full,
+            video_ids=req.video_ids,
+            filter=req.filter,
+            log_func=_log_and_track,
+            stop_flag=lambda: _state["stop_requested"],
+        ),
+    )
+    return {"ok": True, "kind": "rerun_analytics", **desc}
+
+
+@app.post("/rerun/analysis")
+def rerun_analysis(req: RerunRequest):
+    _validate_rerun_body(req, phase="analysis")
+    full = _output_path(req.output)
+    desc = {"output": req.output, "video_ids": req.video_ids,
+            "filter": req.filter}
+    _start_worker(
+        "rerun_analysis", desc,
+        lambda: rerun_mod.rerun_analysis(
+            full,
+            video_ids=req.video_ids,
+            filter=req.filter,
+            log_func=_log_and_track,
+            stop_flag=lambda: _state["stop_requested"],
+        ),
+    )
+    return {"ok": True, "kind": "rerun_analysis", **desc}
+
+
+@app.post("/rerun/synthesis")
+def rerun_synthesis(req: RerunSynthesisRequest):
+    full = _output_path(req.output)
+    desc = {"output": req.output, "skip_narrative": req.skip_narrative}
+    _start_worker(
+        "rerun_synthesis", desc,
+        lambda: rerun_mod.rerun_synthesis(
+            full,
+            skip_narrative=req.skip_narrative,
+            log_func=_log_and_track,
+        ),
+    )
+    return {"ok": True, "kind": "rerun_synthesis", **desc}
+
+
+@app.post("/rerun/tailwind")
+def rerun_tailwind(req: RerunTailwindRequest):
+    if req.video_ids is not None and req.filter is not None:
+        raise HTTPException(
+            400, "Specify `video_ids` OR `filter`, not both.")
+    if req.filter is not None and req.filter not in rerun_mod.FILTERS:
+        raise HTTPException(
+            400,
+            f"Unknown filter '{req.filter}'. "
+            f"Allowed: {sorted(rerun_mod.FILTERS)}")
+    full = _output_path(req.output)
+    desc = {
+        "output": req.output,
+        "video_ids": req.video_ids,
+        "filter": req.filter,
+        "include_all": req.include_all,
+        "use_trends": req.use_trends,
+    }
+    _start_worker(
+        "rerun_tailwind", desc,
+        lambda: rerun_mod.rerun_tailwind(
+            full,
+            video_ids=req.video_ids,
+            filter=req.filter,
+            include_all=req.include_all,
+            use_trends=req.use_trends,
+            log_func=_log_and_track,
+        ),
+    )
+    return {"ok": True, "kind": "rerun_tailwind", **desc}
+
+
+# ─── Control ──────────────────────────────────────────────────────────────────
+
 @app.post("/analyze/stop")
 def analyze_stop():
     if not _state["running"]:
@@ -243,6 +466,7 @@ def analyze_status():
         "stop_requested": _state["stop_requested"],
         "current_job": _state["current_job"],
         "last_error": _state["last_error"],
+        "last_result": _state["last_result"],
         "progress": _state["progress"],
     }
 

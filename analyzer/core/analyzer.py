@@ -22,16 +22,41 @@ from analyzer.core.config import (
     get_analytics_client_secrets,
     get_analytics_token_path,
 )
+from analyzer.core.meta import (
+    backfill_analysis_meta,
+    build_meta,
+    prompt_source_hash,
+)
 from analyzer.core.models import MODEL_PRO
 from analyzer.gemini.client import GeminiVideoAnalyzer
+from analyzer.gemini.prompts import build_analysis_prompt
+from analyzer.tags import format_vocabulary
 from analyzer.youtube.data_api import YouTubeDataClient, duration_to_seconds
 from analyzer.youtube.downloader import ShortDownloader
 
 
 # Bump when the Gemini schema changes shape in a way that makes old
-# records incompatible with new consumers. On mismatch, existing output
-# files are ignored and everything re-analyzes.
+# records incompatible with new consumers. This is stamped into each
+# record's `gemini_analysis._meta.schema_version` so reruns can be
+# scoped to just the stale records — we no longer nuke the whole file
+# on mismatch; the operator decides when to rerun.
 SCHEMA_VERSION = 3
+
+
+def current_analysis_prompt_hash() -> str:
+    """Hash of the Phase 2 prompt + tag vocabulary. Stamped on new records
+    and used by `/rerun/analysis?filter=prompt_mismatch` to find records
+    produced under an older prompt."""
+    return prompt_source_hash(build_analysis_prompt, format_vocabulary())
+
+
+def build_analysis_meta(ran_at: Optional[str] = None) -> dict:
+    return build_meta(
+        model=MODEL_PRO,
+        schema_version=SCHEMA_VERSION,
+        prompt_hash=current_analysis_prompt_hash(),
+        ran_at=ran_at,
+    )
 
 
 class YouTubeShortAnalyzer:
@@ -94,22 +119,34 @@ class YouTubeShortAnalyzer:
     # ─── Persistence ─────────────────────────────────────────────────────────
 
     def load_existing_results(self) -> dict:
-        """Resume from an existing JSON file, or start fresh if empty/corrupt
-        or if the schema version is older than the current one (old records
-        are missing required fields, so rebuilding is the right move)."""
+        """Resume from an existing JSON file, or start fresh if empty/corrupt.
+
+        Schema mismatches are NOT auto-handled: we log a warning and leave
+        the old records alone. The operator decides when to rerun via
+        `/rerun/analysis?filter=schema_mismatch` — we never silently
+        destroy work.
+
+        Any record missing a `gemini_analysis._meta` block gets one
+        backfilled from `analysis_timestamp` so downstream predicates
+        have something to compare against. Backfilled records are
+        marked `model=null, prompt_hash=null` so they're distinguishable
+        from freshly-stamped ones.
+        """
         if (os.path.exists(self.output_file)
                 and os.path.getsize(self.output_file) > 0):
             try:
                 with open(self.output_file, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
                 file_version = loaded.get("metadata", {}).get("schema_version")
-                if file_version == SCHEMA_VERSION:
-                    return loaded
-                self._log(
-                    f"⚠️  Existing results use schema v{file_version}; "
-                    f"current is v{SCHEMA_VERSION}. Starting fresh — "
-                    f"old records will be re-analyzed."
-                )
+                if file_version != SCHEMA_VERSION:
+                    self._log(
+                        f"ℹ️  Existing results use schema v{file_version}; "
+                        f"current is v{SCHEMA_VERSION}. Keeping records "
+                        "as-is — use /rerun/analysis?filter=schema_mismatch "
+                        "to refresh them."
+                    )
+                self._backfill_analysis_meta(loaded)
+                return loaded
             except json.JSONDecodeError as e:
                 self._log(
                     f"⚠️  Existing results file is not valid JSON "
@@ -126,6 +163,23 @@ class YouTubeShortAnalyzer:
             },
             "shorts": [],
         }
+
+    def _backfill_analysis_meta(self, results: dict) -> None:
+        """Stamp a best-guess `_meta` block onto records that lack one.
+
+        Delegates to the shared helper so `list_videos` and the rerun
+        pipeline see the same shape.
+        """
+        schema = (
+            results.get("metadata", {}).get("schema_version")
+            or SCHEMA_VERSION
+        )
+        if backfill_analysis_meta(results, schema):
+            self._log(
+                "Backfilled gemini_analysis._meta on legacy record(s); "
+                "saving."
+            )
+            self.save_results(results)
 
     def save_results(self, results: dict) -> None:
         results["metadata"]["total_shorts_analyzed"] = len(results["shorts"])
@@ -247,6 +301,8 @@ class YouTubeShortAnalyzer:
                     short["views"],
                     analytics=enrichment,
                 )
+                ran_at = datetime.now().isoformat()
+                analysis["_meta"] = build_analysis_meta(ran_at=ran_at)
                 result_entry = {
                     "rank": rank,
                     "video_id": video_id,
@@ -262,7 +318,7 @@ class YouTubeShortAnalyzer:
                     ),
                     "analytics": enrichment,
                     "gemini_analysis": analysis,
-                    "analysis_timestamp": datetime.now().isoformat(),
+                    "analysis_timestamp": ran_at,
                 }
 
                 results["shorts"].append(result_entry)

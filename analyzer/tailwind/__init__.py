@@ -29,10 +29,12 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
+from analyzer.core.meta import build_meta, prompt_source_hash
 from analyzer.core.models import MODEL_PRO
 from analyzer.tailwind.gemini import analyze_tailwind
+from analyzer.tailwind.prompts import build_tailwind_prompt
 from analyzer.tailwind.residual import (
     DEFAULT_MIN_BREAKOUT,
     DEFAULT_MIN_RESIDUAL_RATIO,
@@ -42,6 +44,19 @@ from analyzer.tailwind.residual import (
 
 
 TAILWIND_SCHEMA_VERSION = 1
+
+
+def current_tailwind_prompt_hash() -> str:
+    return prompt_source_hash(build_tailwind_prompt)
+
+
+def build_tailwind_meta(ran_at: Optional[str] = None) -> dict:
+    return build_meta(
+        model=MODEL_PRO,
+        schema_version=TAILWIND_SCHEMA_VERSION,
+        prompt_hash=current_tailwind_prompt_hash(),
+        ran_at=ran_at,
+    )
 
 
 def _derive_output_path(analysis_file: Path) -> Path:
@@ -68,6 +83,7 @@ def _pick_candidates(
     min_breakout: float,
     min_residual_ratio: float,
     include_all: bool,
+    only_video_ids: Optional[Iterable[str]] = None,
 ) -> list[tuple[dict, dict]]:
     """Return [(short, residual)] pairs that warrant a Gemini tailwind call.
 
@@ -79,9 +95,21 @@ def _pick_candidates(
 
     `include_all=True` bypasses both cutoffs — useful when the user
     wants tailwind annotation on every short regardless of residual.
+
+    `only_video_ids`: when given (rerun path), bypass cutoffs entirely
+    and restrict to those video_ids. The operator picked them already;
+    they don't need to pass the residual filter again.
     """
+    allowlist = set(only_video_ids) if only_video_ids is not None else None
+
     picked: list[tuple[dict, dict]] = []
     for short in shorts:
+        if allowlist is not None:
+            if short.get("video_id") not in allowlist:
+                continue
+            picked.append((short, compute_residual(short, corpus_median_avp)))
+            continue
+
         residual = compute_residual(short, corpus_median_avp)
         if include_all:
             picked.append((short, residual))
@@ -102,6 +130,21 @@ def _pick_candidates(
     return picked
 
 
+def _load_existing_tailwind(output_path: Path) -> dict:
+    """Read the current tailwind.json if present, so rerun-on-subset can
+    merge into it instead of clobbering the unselected entries."""
+    if not output_path.exists():
+        return {}
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if isinstance(existing.get("videos"), dict):
+            return existing["videos"]
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
 def run_tailwind_analysis(
     analysis_file: str | os.PathLike,
     output_file: str | os.PathLike | None = None,
@@ -109,15 +152,20 @@ def run_tailwind_analysis(
     min_residual_ratio: float = DEFAULT_MIN_RESIDUAL_RATIO,
     include_all: bool = False,
     use_trends: bool = False,
+    video_ids: Optional[Iterable[str]] = None,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Build `<handle>.tailwind.json` from an analyzer output file.
 
     min_breakout / min_residual_ratio: candidate cutoffs (see
-        residual.py). Ignored when include_all=True.
+        residual.py). Ignored when include_all=True or when video_ids
+        is given.
     use_trends: attach Google Trends interest-over-time to each
         hypothesis. Requires `pip install pytrends`; if missing, a
         warning is logged and the run proceeds without Trends data.
+    video_ids: when given (rerun path), process only those video IDs
+        and merge into the existing tailwind file — entries for
+        unselected videos are preserved.
     """
     log = log_func or print
 
@@ -152,16 +200,30 @@ def run_tailwind_analysis(
         min_breakout=min_breakout,
         min_residual_ratio=min_residual_ratio,
         include_all=include_all,
+        only_video_ids=video_ids,
     )
-    log(
-        f"Candidates for tailwind analysis: {len(candidates)}"
-        + (" (all shorts — include_all=True)" if include_all else "")
-    )
+    if video_ids is not None:
+        log(
+            f"Candidates for tailwind analysis: {len(candidates)} "
+            "(restricted to explicit video_ids — cutoffs bypassed)"
+        )
+    else:
+        log(
+            f"Candidates for tailwind analysis: {len(candidates)}"
+            + (" (all shorts — include_all=True)" if include_all else "")
+        )
     if not candidates:
         log(
             "No shorts crossed the residual cutoffs. Re-run with "
             "--all to force tailwind analysis on every record."
         )
+
+    # Start from whatever's already on disk so a rerun on a subset
+    # merges instead of clobbering. For a full run this is a no-op;
+    # every candidate gets re-written anyway.
+    preserved_videos = (
+        _load_existing_tailwind(output_path) if video_ids is not None else {}
+    )
 
     # Optional Trends wiring — resolved once up front so we can warn
     # loudly if requested-but-unavailable, instead of silently skipping
@@ -206,6 +268,7 @@ def run_tailwind_analysis(
             except Exception as e:
                 log(f"  Trends enrichment failed: {e}")
 
+        tailwind["_meta"] = build_tailwind_meta()
         videos[vid] = {
             "title": title,
             "published_date": short.get("published_date"),
@@ -213,6 +276,9 @@ def run_tailwind_analysis(
             "residual": residual,
             "tailwind": tailwind,
         }
+
+    # Merge: preserved entries first, freshly-processed ones win on conflict.
+    merged_videos = {**preserved_videos, **videos}
 
     result = {
         "metadata": {
@@ -234,8 +300,10 @@ def run_tailwind_analysis(
             },
             "corpus_median_avg_view_pct": corpus_median_avp,
             "trends_enriched": trends_enricher is not None,
+            "restricted_to_video_ids": (
+                list(video_ids) if video_ids is not None else None),
         },
-        "videos": videos,
+        "videos": merged_videos,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -248,4 +316,9 @@ def run_tailwind_analysis(
     return result
 
 
-__all__ = ["run_tailwind_analysis", "TAILWIND_SCHEMA_VERSION"]
+__all__ = [
+    "run_tailwind_analysis",
+    "TAILWIND_SCHEMA_VERSION",
+    "current_tailwind_prompt_hash",
+    "build_tailwind_meta",
+]
