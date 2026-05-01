@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in ['api_server.py','main.py','config.py','strategist/strategy.py','strategist/traces.py','strategist/analyzer_client.py','strategist/reasoning.py']]\")"
+    ],
+    "additionalDirectories": [
+      "/Users/thomasbalaban/Downloads/projects/shorts_strategist",
+      "/Users/thomasbalaban/Downloads/projects/shorts_strategist/traces"
     ]
   }
 }
