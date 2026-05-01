@@ -164,11 +164,13 @@ def _analyzer_worker(
     channel_url: str,
     output_filename: str,
     max_shorts: int,
+    recent_n: int,
 ) -> None:
     output_path = os.path.join(OUTPUT_DIR, output_filename)
     _log(f"=== Analysis started: {channel_url} ===")
     _log(f"    Output: {output_path}")
     _log(f"    Max shorts: {max_shorts}")
+    _log(f"    Recent cohort size: {recent_n}")
 
     with _lock:
         _state["current_job"] = {
@@ -176,6 +178,7 @@ def _analyzer_worker(
             "output_filename": output_filename,
             "output_path": output_path,
             "max_shorts": max_shorts,
+            "recent_n": recent_n,
             "started_at": time.time(),
         }
         _state["last_error"] = None
@@ -192,6 +195,7 @@ def _analyzer_worker(
             channel_url=channel_url,
             output_file=output_path,
             max_shorts=max_shorts,
+            recent_n=recent_n,
             log_func=_log_and_track,
             stop_flag=lambda: _state["stop_requested"],
         )
@@ -232,6 +236,7 @@ class StartRequest(BaseModel):
     channel_url: str
     output_filename: Optional[str] = None   # defaults to "<handle>.json"
     max_shorts: int = 100
+    recent_n: int = 30
 
 
 class RerunRequest(BaseModel):
@@ -329,7 +334,7 @@ def analyze_start(req: StartRequest):
 
     threading.Thread(
         target=_analyzer_worker,
-        args=(req.channel_url, output_filename, req.max_shorts),
+        args=(req.channel_url, output_filename, req.max_shorts, req.recent_n),
         daemon=True,
     ).start()
 
@@ -338,6 +343,7 @@ def analyze_start(req: StartRequest):
         "channel_url": req.channel_url,
         "output_filename": output_filename,
         "max_shorts": req.max_shorts,
+        "recent_n": req.recent_n,
     }
 
 

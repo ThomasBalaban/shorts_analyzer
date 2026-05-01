@@ -67,13 +67,18 @@ class YouTubeShortAnalyzer:
         channel_url: str,
         output_file: str = "shorts_analysis.json",
         max_shorts: int = 100,
+        recent_n: int = 30,
         temp_dir: Optional[str] = None,
         log_func: Optional[Callable[[str], None]] = None,
         stop_flag: Optional[Callable[[], bool]] = None,
     ):
         self.channel_url = channel_url
         self.output_file = output_file
-        self.max_shorts = max_shorts
+        # max_shorts is split evenly between the top-by-views and
+        # bottom-by-views cohorts. Recent is its own cohort.
+        self.top_n = max_shorts // 2
+        self.bottom_n = max_shorts - self.top_n
+        self.recent_n = recent_n
         self.log_func = log_func or print
         self.stop_flag = stop_flag or (lambda: False)
 
@@ -93,6 +98,11 @@ class YouTubeShortAnalyzer:
         output_path = Path(self.output_file)
         context_file = output_path.with_name(
             output_path.stem + ".context.json")
+        # Videos that fall out of all current cohorts are parked here so
+        # nothing is lost — if they re-enter a cohort on a later run we
+        # promote them back into the main file.
+        self.historical_file = str(output_path.with_name(
+            output_path.stem + ".historical.json"))
 
         self.baseline = ChannelBaseline(
             context_file=context_file,
@@ -189,6 +199,155 @@ class YouTubeShortAnalyzer:
         with open(self.output_file, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, ensure_ascii=False)
 
+    # ─── Cohorts + historical ────────────────────────────────────────────────
+
+    def _build_cohorts(self, all_shorts: list) -> dict:
+        """Compute the three cohorts and which one(s) each video belongs to.
+
+        Returns:
+            {
+              "selected": [short, ...],          # dedup'd union
+              "memberships": {video_id: [labels]},
+              "stats": {top_n_actual, bottom_n_actual, recent_n_actual},
+            }
+
+        Top and bottom are de-overlapped: a video in top_50 is never also
+        in bottom_50. Recent can overlap with either.
+        """
+        by_views_desc = sorted(
+            all_shorts, key=lambda s: s["views"], reverse=True)
+
+        top = by_views_desc[:self.top_n]
+        top_ids = {s["video_id"] for s in top}
+
+        # Bottom = lowest-view shorts excluding anything already in top.
+        bottom_pool = [s for s in by_views_desc if s["video_id"] not in top_ids]
+        bottom = (sorted(bottom_pool, key=lambda s: s["views"])
+                  [:self.bottom_n])
+
+        def _recency_key(s: dict) -> str:
+            # Fall back to published_date if published_at is missing on
+            # records fetched by an older client (shouldn't happen for new
+            # fetches, but harmless).
+            return s.get("published_at") or s.get("published_date") or ""
+
+        by_recent = sorted(all_shorts, key=_recency_key, reverse=True)
+        recent = by_recent[:self.recent_n]
+
+        memberships: dict[str, list[str]] = {}
+        for s in top:
+            memberships.setdefault(s["video_id"], []).append("top_50")
+        for s in bottom:
+            memberships.setdefault(s["video_id"], []).append("bottom_50")
+        for s in recent:
+            memberships.setdefault(s["video_id"], []).append("recent_30")
+
+        seen: set[str] = set()
+        selected: list[dict] = []
+        for source in (top, bottom, recent):
+            for s in source:
+                if s["video_id"] in seen:
+                    continue
+                seen.add(s["video_id"])
+                selected.append(s)
+
+        return {
+            "selected": selected,
+            "memberships": memberships,
+            "stats": {
+                "top_n_actual": len(top),
+                "bottom_n_actual": len(bottom),
+                "recent_n_actual": len(recent),
+            },
+        }
+
+    def _load_historical(self) -> dict:
+        if (os.path.exists(self.historical_file)
+                and os.path.getsize(self.historical_file) > 0):
+            try:
+                with open(self.historical_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                self._log(
+                    f"⚠️  Historical file at {self.historical_file} is "
+                    "not valid JSON — starting a fresh historical record."
+                )
+        return {
+            "metadata": {
+                "channel_url": self.channel_url,
+                "schema_version": SCHEMA_VERSION,
+                "note": (
+                    "Records of shorts that were once in a cohort but no "
+                    "longer are. Promoted back into the main file if they "
+                    "re-enter on a later run."
+                ),
+            },
+            "shorts": [],
+        }
+
+    def _save_historical(self, historical: dict) -> None:
+        os.makedirs(
+            os.path.dirname(os.path.abspath(self.historical_file)) or ".",
+            exist_ok=True,
+        )
+        with open(self.historical_file, "w", encoding="utf-8") as f:
+            json.dump(historical, f, indent=2, ensure_ascii=False)
+
+    def _reconcile_with_cohorts(
+        self, results: dict, current_ids: set[str]
+    ) -> None:
+        """Move ejected records out, promote returning records back in.
+
+        Runs once per `process_shorts` call, before the main loop. After
+        this returns, `results['shorts']` only contains records whose
+        video_id is in `current_ids` (the union of all current cohorts).
+        """
+        historical = self._load_historical()
+
+        # Pull anything from historical that's back in a cohort.
+        promoted: list[dict] = []
+        kept_historical: list[dict] = []
+        for entry in historical.get("shorts", []):
+            if entry.get("video_id") in current_ids:
+                promoted.append(entry)
+            else:
+                kept_historical.append(entry)
+
+        # Move anything from main results that's no longer in a cohort.
+        kept_main: list[dict] = []
+        ejected: list[dict] = []
+        for entry in results["shorts"]:
+            if entry.get("video_id") in current_ids:
+                kept_main.append(entry)
+            else:
+                ejected.append(entry)
+
+        # Dedupe historical by video_id (newer ejection wins).
+        by_id = {e["video_id"]: e for e in kept_historical}
+        for e in ejected:
+            by_id[e["video_id"]] = e
+        kept_historical = list(by_id.values())
+
+        results["shorts"] = kept_main + promoted
+
+        if promoted:
+            self._log(
+                f"Promoted {len(promoted)} record(s) back from historical "
+                "(re-entered a cohort)."
+            )
+        if ejected:
+            self._log(
+                f"Ejected {len(ejected)} record(s) to historical "
+                "(no longer in any cohort)."
+            )
+
+        if promoted or ejected:
+            self.save_results(results)
+            historical["shorts"] = kept_historical
+            historical["metadata"]["last_updated"] = (
+                datetime.now().isoformat())
+            self._save_historical(historical)
+
     def _refresh_existing_enrichment(self, results: dict) -> None:
         """Re-stamp breakout_score and analytics on already-analyzed records.
 
@@ -254,37 +413,60 @@ class YouTubeShortAnalyzer:
             )
             channel_context = self.baseline.build(all_shorts)
 
+        # ── Cohort selection ─────────────────────────────────────────────────
+        cohorts = self._build_cohorts(all_shorts)
+        selected = cohorts["selected"]
+        memberships = cohorts["memberships"]
+        stats = cohorts["stats"]
+        current_ids = {s["video_id"] for s in selected}
+
+        self._log(
+            f"\nCohorts (from {len(all_shorts)} shorts): "
+            f"top_50={stats['top_n_actual']}, "
+            f"bottom_50={stats['bottom_n_actual']}, "
+            f"recent_30={stats['recent_n_actual']} "
+            f"→ {len(selected)} unique to analyze"
+        )
+
+        # Move records that fell out of every cohort to historical, and
+        # pull back any historical records that re-entered.
+        self._reconcile_with_cohorts(results, current_ids)
+        analyzed_video_ids = {s["video_id"] for s in results["shorts"]}
+
+        # Tag every record (both freshly-analyzed and previously-analyzed)
+        # with its current cohort membership so downstream consumers can
+        # filter by cohort without recomputing. Also backfill
+        # `published_at` from the fresh fetch onto records originally
+        # written before that field existed.
+        fresh_by_id = {s["video_id"]: s for s in selected}
+        for entry in results["shorts"]:
+            vid = entry["video_id"]
+            entry["cohorts"] = memberships.get(vid, [])
+            if not entry.get("published_at") and vid in fresh_by_id:
+                fresh_pub = fresh_by_id[vid].get("published_at")
+                if fresh_pub:
+                    entry["published_at"] = fresh_pub
+
         # Resumed records were saved against a possibly-stale baseline —
         # their breakout_score and analytics blob need refreshing before
         # we skip them in the main loop.
         self._refresh_existing_enrichment(results)
+        self.save_results(results)
 
-        # Re-sort full channel: primary = breakout_score desc, secondary = views desc
-        def _sort_key(s: dict):
-            score = self.baseline.get_breakout_score(s["video_id"])
-            return (score or 0.0, s["views"])
-
-        all_shorts.sort(key=_sort_key, reverse=True)
-        top_shorts = all_shorts[:self.max_shorts]
-        self._log(
-            f"Sorted {len(all_shorts)} shorts by breakout score, "
-            f"taking top {len(top_shorts)} for analysis "
-            "(views ÷ channel median at publish month)"
-        )
-
-        for rank, short in enumerate(top_shorts, start=1):
+        for rank, short in enumerate(selected, start=1):
             self._check_stop()
             video_id = short["video_id"]
             if video_id in analyzed_video_ids:
                 self._log(
-                    f"[{rank}/{len(top_shorts)}] Skipping {video_id} "
+                    f"[{rank}/{len(selected)}] Skipping {video_id} "
                     f"(already analyzed)"
                 )
                 continue
 
             self._log(
-                f"\n[{rank}/{len(top_shorts)}] Processing: {short['title']}")
+                f"\n[{rank}/{len(selected)}] Processing: {short['title']}")
             self._log(f"  Views: {short['views']:,}")
+            self._log(f"  Cohorts: {', '.join(memberships[video_id])}")
             self._log(f"  URL: {short['url']}")
 
             try:
@@ -310,6 +492,7 @@ class YouTubeShortAnalyzer:
                     "title": short["title"],
                     "views": short["views"],
                     "published_date": short["published_date"],
+                    "published_at": short.get("published_at"),
                     "duration_seconds": duration_to_seconds(
                         short["duration"]),
                     "breakout_score": (
@@ -317,6 +500,7 @@ class YouTubeShortAnalyzer:
                         else self.baseline.get_breakout_score(video_id)
                     ),
                     "analytics": enrichment,
+                    "cohorts": memberships.get(video_id, []),
                     "gemini_analysis": analysis,
                     "analysis_timestamp": ran_at,
                 }

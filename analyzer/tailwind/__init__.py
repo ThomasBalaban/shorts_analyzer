@@ -153,6 +153,7 @@ def run_tailwind_analysis(
     include_all: bool = False,
     use_trends: bool = False,
     video_ids: Optional[Iterable[str]] = None,
+    resume: bool = False,
     log_func: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Build `<handle>.tailwind.json` from an analyzer output file.
@@ -166,6 +167,10 @@ def run_tailwind_analysis(
     video_ids: when given (rerun path), process only those video IDs
         and merge into the existing tailwind file — entries for
         unselected videos are preserved.
+    resume: skip candidates that already have a successful tailwind
+        entry on disk (no `_error`, has hypotheses). Re-processes only
+        missing or errored entries. Existing successful entries are
+        preserved unchanged.
     """
     log = log_func or print
 
@@ -212,17 +217,52 @@ def run_tailwind_analysis(
             f"Candidates for tailwind analysis: {len(candidates)}"
             + (" (all shorts — include_all=True)" if include_all else "")
         )
-    if not candidates:
+
+    # In resume mode, drop candidates that already have a successful
+    # entry on disk and merge with the existing file. A successful
+    # entry has no `_error` and at least one hypothesis (or an
+    # explicitly-empty `hypotheses` list with a residual_summary,
+    # meaning Gemini answered, just unimpressed).
+    existing_videos: dict = {}
+    if resume or video_ids is not None:
+        existing_videos = _load_existing_tailwind(output_path)
+
+    if resume:
+        before = len(candidates)
+
+        def _is_done(vid: str) -> bool:
+            entry = existing_videos.get(vid)
+            if not entry:
+                return False
+            tw = entry.get("tailwind") or {}
+            if tw.get("_error"):
+                return False
+            return "hypotheses" in tw
+
+        candidates = [
+            (s, r) for (s, r) in candidates if not _is_done(s["video_id"])
+        ]
+        skipped = before - len(candidates)
         log(
-            "No shorts crossed the residual cutoffs. Re-run with "
-            "--all to force tailwind analysis on every record."
+            f"Resume mode: skipping {skipped} already-completed "
+            f"candidate(s); {len(candidates)} remaining to process."
         )
+
+    if not candidates:
+        if resume:
+            log("Nothing to do — every candidate already has a "
+                "successful tailwind entry.")
+        else:
+            log(
+                "No shorts crossed the residual cutoffs. Re-run with "
+                "--all to force tailwind analysis on every record."
+            )
 
     # Start from whatever's already on disk so a rerun on a subset
     # merges instead of clobbering. For a full run this is a no-op;
     # every candidate gets re-written anyway.
     preserved_videos = (
-        _load_existing_tailwind(output_path) if video_ids is not None else {}
+        existing_videos if (video_ids is not None or resume) else {}
     )
 
     # Optional Trends wiring — resolved once up front so we can warn

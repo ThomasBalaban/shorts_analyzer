@@ -85,8 +85,12 @@ class YouTubeDataClient:
         if self.stop_flag():
             raise InterruptedError("Analysis stopped by user")
 
-    def resolve_channel_id(self, handle: str) -> str:
-        """Turn '@handle' (or 'handle') into a channel ID."""
+    def resolve_channel(self, handle: str) -> dict:
+        """Turn '@handle' (or 'handle') into {channel_id, uploads_playlist_id}.
+
+        We need the uploads playlist to enumerate every video reliably —
+        `search().list()` silently caps at ~500 results and drops videos.
+        """
         response = self.youtube.channels().list(
             part="id,contentDetails",
             forHandle=handle.lstrip("@"),
@@ -96,10 +100,24 @@ class YouTubeDataClient:
         if not response.get("items"):
             raise ValueError(f"Channel not found: {handle}")
 
-        return response["items"][0]["id"]
+        item = response["items"][0]
+        return {
+            "channel_id": item["id"],
+            "uploads_playlist_id": (
+                item["contentDetails"]["relatedPlaylists"]["uploads"]
+            ),
+        }
 
-    def list_all_video_ids(self, channel_id: str) -> List[str]:
-        """Paginate through every video on a channel (newest first)."""
+    def resolve_channel_id(self, handle: str) -> str:
+        """Backwards-compatible accessor for just the channel ID."""
+        return self.resolve_channel(handle)["channel_id"]
+
+    def list_all_video_ids(self, uploads_playlist_id: str) -> List[str]:
+        """Paginate the uploads playlist and return every video ID.
+
+        Uses `playlistItems().list()` rather than `search().list()` —
+        the latter caps at ~500 results and silently omits videos.
+        """
         all_videos: List[str] = []
         next_page_token = None
         page_count = 0
@@ -107,18 +125,16 @@ class YouTubeDataClient:
         while True:
             self._check_stop()
             page_count += 1
-            search_response = self.youtube.search().list(
-                part="id",
-                channelId=channel_id,
-                type="video",
+            response = self.youtube.playlistItems().list(
+                part="contentDetails",
+                playlistId=uploads_playlist_id,
                 maxResults=50,
                 pageToken=next_page_token,
-                order="date",
             ).execute()
 
             video_ids = [
-                item["id"]["videoId"]
-                for item in search_response.get("items", [])
+                item["contentDetails"]["videoId"]
+                for item in response.get("items", [])
             ]
             if not video_ids:
                 break
@@ -129,7 +145,7 @@ class YouTubeDataClient:
                 f"(total: {len(all_videos)})"
             )
 
-            next_page_token = search_response.get("nextPageToken")
+            next_page_token = response.get("nextPageToken")
             if not next_page_token:
                 break
 
@@ -150,7 +166,8 @@ class YouTubeDataClient:
         population rather than the top-N slice).
 
         Returns a list of dicts:
-            {video_id, title, views, published_date, duration, url}
+            {video_id, title, views, published_date, published_at,
+             duration, url}
         """
         handle = extract_channel_handle(channel_url)
         self._log(f"Fetching shorts from channel: {handle}")
@@ -159,11 +176,16 @@ class YouTubeDataClient:
         today = datetime.now().strftime("%Y-%m-%d")
 
         try:
-            channel_id = self.resolve_channel_id(handle)
+            channel = self.resolve_channel(handle)
+            channel_id = channel["channel_id"]
+            uploads_playlist_id = channel["uploads_playlist_id"]
             self._log(f"Found channel ID: {channel_id}")
 
-            self._log("Fetching all videos from channel...")
-            all_videos = self.list_all_video_ids(channel_id)
+            self._log(
+                f"Fetching all videos via uploads playlist "
+                f"{uploads_playlist_id}..."
+            )
+            all_videos = self.list_all_video_ids(uploads_playlist_id)
             self._log(f"Total videos found: {len(all_videos)}")
 
             self._log("Filtering for shorts and getting view counts...")
@@ -180,9 +202,8 @@ class YouTubeDataClient:
                 ).execute()
 
                 for video in videos_response.get("items", []):
-                    published_date = (
-                        video["snippet"]["publishedAt"].split("T")[0]
-                    )
+                    published_at = video["snippet"]["publishedAt"]
+                    published_date = published_at.split("T")[0]
 
                     # Skip videos that haven't gone live yet — they have no
                     # real view counts and Analytics will reject date queries
@@ -199,6 +220,7 @@ class YouTubeDataClient:
                             "views": int(
                                 video["statistics"].get("viewCount", 0)),
                             "published_date": published_date,
+                            "published_at": published_at,
                             "duration": duration,
                             "url": (
                                 f"https://www.youtube.com/shorts/"

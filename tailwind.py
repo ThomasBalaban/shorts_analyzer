@@ -84,6 +84,16 @@ def main() -> int:
             "limited; expect ~3s delay per hypothesis."
         ),
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip candidates that already have a successful tailwind "
+            "entry on disk; re-process only missing or errored entries "
+            "(e.g. after a Gemini quota 429). Existing successful "
+            "entries are preserved."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -94,6 +104,7 @@ def main() -> int:
             min_residual_ratio=args.min_residual_ratio,
             include_all=args.all,
             use_trends=args.use_trends,
+            resume=args.resume,
         )
         return 0
     except FileNotFoundError as e:

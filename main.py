@@ -5,6 +5,7 @@ Usage:
     python main.py                                    # uses defaults below
     python main.py --channel @PeepingOtter
     python main.py --channel https://youtube.com/@PeepingOtter --max 50
+    python main.py --channel @PeepingOtter --recent 50
     python main.py --channel @PeepingOtter --output my_results.json
 """
 
@@ -19,7 +20,11 @@ from analyzer.tailwind import run_tailwind_analysis
 
 # Defaults — edit these to change what `python main.py` does with no args
 DEFAULT_CHANNEL = "https://www.youtube.com/@PeepingOtter/shorts"
+# Split evenly between the top-by-views and bottom-by-views cohorts
+# (so 100 → top 50 + bottom 50). The recent-by-upload cohort is sized
+# separately by --recent.
 DEFAULT_MAX_SHORTS = 100
+DEFAULT_RECENT_N = 30
 DEFAULT_OUTPUT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "output")
 
@@ -53,7 +58,19 @@ def main() -> int:
     parser.add_argument(
         "--max", "-m",
         type=int, default=DEFAULT_MAX_SHORTS, dest="max_shorts",
-        help=f"Max shorts to analyze (default: {DEFAULT_MAX_SHORTS})",
+        help=(
+            "Total size of the views-based cohorts, split evenly between "
+            "top-by-views and bottom-by-views "
+            f"(default: {DEFAULT_MAX_SHORTS} → top 50 + bottom 50)"
+        ),
+    )
+    parser.add_argument(
+        "--recent",
+        type=int, default=DEFAULT_RECENT_N, dest="recent_n",
+        help=(
+            "Size of the most-recent-by-upload cohort "
+            f"(default: {DEFAULT_RECENT_N})"
+        ),
     )
     parser.add_argument(
         "--output", "-o",
@@ -119,6 +136,7 @@ def main() -> int:
         channel_url=channel_url,
         output_file=output_path,
         max_shorts=args.max_shorts,
+        recent_n=args.recent_n,
     )
 
     try:
