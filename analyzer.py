@@ -2,7 +2,7 @@
 YouTube Shorts Analyzer (standalone)
 
 Fetches a channel's top shorts, downloads them, runs Gemini analysis, and
-saves the result to JSON. Extracted from SimpleAutoSubs as a standalone
+saves the result to JSON. Extracted from shorts-auto-editor as a standalone
 tool with its own config and API.
 """
 

@@ -1,7 +1,7 @@
 """
 Shorts Analyzer Headless API Server
 REST API for driving the analyzer from another app (e.g. a hub).
-Port: 9021  (SimpleAutoSubs uses 9020)
+Port: 9021  (shorts-auto-editor uses 9020)
 """
 import os
 import sys

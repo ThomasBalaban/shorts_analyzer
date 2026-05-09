@@ -1,7 +1,7 @@
 """
 Gemini model configuration for the Shorts Analyzer.
 
-Kept separate from the main SimpleAutoSubs app so this tool is fully
+Kept separate from the main shorts-auto-editor app so this tool is fully
 standalone. If you upgrade the model, change it here.
 """
 

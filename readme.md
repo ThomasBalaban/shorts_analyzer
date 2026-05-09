@@ -1,7 +1,7 @@
 # Shorts Analyzer
 
 Standalone tool for analyzing a YouTube channel's top Shorts with Gemini.
-Extracted from SimpleAutoSubs as a standalone app with its own API server.
+Extracted from shorts-auto-editor as a standalone app with its own API server.
 
 For each Short it:
 
@@ -135,7 +135,7 @@ curl "http://localhost:9021/results/read?name=PeepingOtter.json"
 - Output files live in `./output/` and are named `<channel-handle>.json` by
   default.
 - The `temp_downloads/` directory is cleared after each job.
-- Port is hardcoded to **9021** in `api_server.py`. SimpleAutoSubs uses
+- Port is hardcoded to **9021** in `api_server.py`. shorts-auto-editor uses
   9020, so they don't collide.
 
 
