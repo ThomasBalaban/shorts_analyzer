@@ -1,31 +1,34 @@
-"""Config loader for the Shorts Analyzer."""
+"""Config loader for the Shorts Analyzer.
 
-import json
+API keys now come from the centralized youtube_hub config. Sibling-relative
+path resolution lets us avoid touching PYTHONPATH at runtime.
+"""
+
 import os
+import sys
 
-_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "config.json")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_HUB_CONFIG = os.path.abspath(os.path.join(_HERE, "..", "youtube_hub", "config"))
+if _HUB_CONFIG not in sys.path:
+    sys.path.insert(0, _HUB_CONFIG)
 
-
-def _load_config() -> dict:
-    if not os.path.exists(_CONFIG_PATH):
-        raise FileNotFoundError(
-            f"config.json not found at {_CONFIG_PATH}. "
-            "Copy config.example.json to config.json and add your API keys."
-        )
-    with open(_CONFIG_PATH, "r") as f:
-        return json.load(f)
+from shared_secrets import (  # noqa: E402
+    get_gemini_api_key as _shared_gemini,
+    get_youtube_api_key as _shared_youtube,
+)
 
 
 def get_gemini_api_key() -> str:
-    key = _load_config().get("GEMINI_API_KEY", "")
+    key = _shared_gemini()
     if not key or key == "YOUR_API_KEY_HERE":
-        raise ValueError("GEMINI_API_KEY not set in config.json")
+        raise ValueError(
+            "GEMINI_API_KEY not set in youtube_hub/config/secrets.json")
     return key
 
 
 def get_youtube_api_key() -> str:
-    key = _load_config().get("YOUTUBE_API_KEY", "")
+    key = _shared_youtube()
     if not key or key == "YOUR_API_KEY_HERE":
-        raise ValueError("YOUTUBE_API_KEY not set in config.json")
+        raise ValueError(
+            "YOUTUBE_API_KEY not set in youtube_hub/config/secrets.json")
     return key
